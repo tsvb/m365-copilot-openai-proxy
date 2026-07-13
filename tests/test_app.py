@@ -162,7 +162,7 @@ def test_default_client_factory_reloads_token_from_env(tmp_path, monkeypatch) ->
     seen_tokens: list[str] = []
 
     class RecordingCopilotClient(FakeCopilotClient):
-        def __init__(self, access_token: str, _time_zone: str):
+        def __init__(self, access_token: str, _time_zone: str, work_mode: bool = True):
             super().__init__()
             seen_tokens.append(access_token)
 
@@ -650,3 +650,75 @@ def test_streaming_emulation_emits_error_on_upstream_failure() -> None:
     body = _collect_stream(client, payload)
     assert '"type": "upstream_error"' in body
     assert "data: [DONE]" in body
+
+
+def test_settings_default_to_work_mode() -> None:
+    settings = Settings(M365_ACCESS_TOKEN="x")
+    assert settings.work_mode is True
+
+
+def test_settings_work_mode_is_overridable() -> None:
+    settings = Settings(M365_ACCESS_TOKEN="x", M365_WORK_MODE=False)
+    assert settings.work_mode is False
+
+
+def test_ws_url_work_mode_uses_work_agent_and_grounding_scenario() -> None:
+    client = SubstrateCopilotClient(make_jwt(int(time.time()) + 3600))  # work_mode defaults True
+    url = client._ws_url("conv", "sess", "req")
+    assert "agent=work" in url
+    assert "scenario=officeweb" in url
+    assert "licenseType=Premium" in url
+    assert "agent=web" not in url
+
+
+def test_ws_url_web_mode_uses_included_scenario() -> None:
+    client = SubstrateCopilotClient(make_jwt(int(time.time()) + 3600), work_mode=False)
+    url = client._ws_url("conv", "sess", "req")
+    assert "agent=web" in url
+    assert "scenario=OfficeWebIncludedCopilot" in url
+    assert "licenseType=Starter" in url
+
+
+def test_work_mode_invoke_uses_enterprise_connectors() -> None:
+    client = SubstrateCopilotClient(make_jwt(int(time.time()) + 3600))
+    invoke = client._chat_invoke("hi", "conv", "sess", "req", True)
+    assert "bizchat_enable_federated_connectors" in invoke
+    assert '"productEntryPoint": "ChatPanel"' in invoke
+    assert '"disconnectBehavior": "continue"' in invoke
+
+
+def test_web_mode_invoke_omits_enterprise_connectors() -> None:
+    client = SubstrateCopilotClient(make_jwt(int(time.time()) + 3600), work_mode=False)
+    invoke = client._chat_invoke("hi", "conv", "sess", "req", True)
+    assert "bizchat_enable_federated_connectors" not in invoke
+    assert "disconnectBehavior" not in invoke
+
+
+def test_factory_passes_work_mode_to_client(tmp_path, monkeypatch) -> None:
+    token = make_jwt(int(time.time()) + 3600)
+    env_path = tmp_path / ".env"
+    env_path.write_text(f"M365_ACCESS_TOKEN={token}\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    seen: dict = {}
+
+    class RecordingCopilotClient(FakeCopilotClient):
+        def __init__(self, access_token, time_zone, work_mode):
+            super().__init__()
+            seen["work_mode"] = work_mode
+
+    monkeypatch.setattr(
+        "m365_copilot_openai_proxy.app.SubstrateCopilotClient",
+        RecordingCopilotClient,
+    )
+    settings = Settings(M365_ACCESS_TOKEN=token, M365_WORK_MODE=True)
+    app = create_app(settings=settings)
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "ignored", "messages": [{"role": "user", "content": "Hello"}]},
+    )
+
+    assert response.status_code == 200
+    assert seen == {"work_mode": True}
