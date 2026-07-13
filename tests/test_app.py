@@ -466,3 +466,19 @@ def test_responses_requires_final_user_message() -> None:
 
     assert response.status_code == 400
     assert response.json()["detail"] == "The final Responses input message must be a user message."
+
+
+def test_settings_default_to_paid_grounding_scenario() -> None:
+    settings = Settings(M365_ACCESS_TOKEN="x")
+    assert settings.scenario == "OfficeWebPaidCopilot"
+    assert settings.license_type == "Premium"
+
+
+def test_settings_scenario_and_license_are_overridable() -> None:
+    settings = Settings(
+        M365_ACCESS_TOKEN="x",
+        M365_SCENARIO="OfficeWebIncludedCopilot",
+        M365_LICENSE_TYPE="Starter",
+    )
+    assert settings.scenario == "OfficeWebIncludedCopilot"
+    assert settings.license_type == "Starter"
