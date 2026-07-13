@@ -1,7 +1,27 @@
-# M365 Graph Grounding (Paid Copilot Scenario)
+# M365 Graph Grounding (Work Mode / Work IQ)
 
 **Date:** 2026-07-13
-**Status:** Design approved, pending implementation plan
+**Status:** Implemented.
+
+## Correction during implementation
+
+The original design (below) attributed grounding to the paid Copilot **scenario**
+(`OfficeWebPaidCopilot` / `licenseType=Premium`). That turned out to be necessary but
+**not sufficient** — it grounded only intermittently. Re-capturing the real Copilot UI
+with **Work IQ enabled** revealed the actual switch: **Work mode**, i.e.
+`agent=work` + `scenario=officeweb` in the WebSocket URL **plus** the enterprise
+option-sets in the invoke payload (`bizchat_enable_federated_connectors`,
+`enterprise_flux_work`, `enterprise_toolbox_with_skdsstore`, `enterprise_pagination_support`,
+etc.) and the Chat-surface `clientInfo` fields. Replicating the full Work-mode request
+grounded reliably (4/4 on calendar, plus email and file queries returning real data).
+
+The implementation therefore replaces the `M365_SCENARIO` / `M365_LICENSE_TYPE`
+settings with a single **`M365_WORK_MODE`** boolean (default `true`). Work mode sends
+the grounding request; web mode falls back to `agent=web` / `OfficeWebIncludedCopilot`
+with the consumer option-sets for accounts without a paid license. The sections below
+are the original (superseded) design, kept for history.
+
+---
 
 ## Summary
 
