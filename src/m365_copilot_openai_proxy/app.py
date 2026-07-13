@@ -14,9 +14,69 @@ from .substrate_client import SubstrateCopilotClient, SubstrateCopilotError
 from .token_store import AccessTokenStore
 from .models import AnthropicMessagesRequest, OpenAIChatRequest, OpenAIResponsesRequest
 from .translator import translate_anthropic_request, translate_openai_request, translate_responses_request
+from .tool_emulation import FinalAnswer, ToolAction, filter_tools, run_emulation_turn
 
 _PERSIST_MODEL_SUFFIX = ":persist"
 _SESSION_ID_HEADER = "x-m365-session-id"
+
+
+def _tool_calls_response(model_alias: str, action: ToolAction) -> dict:
+    return {
+        "id": f"chatcmpl_{uuid.uuid4().hex}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model_alias,
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": f"call_{uuid.uuid4().hex[:24]}",
+                            "type": "function",
+                            "function": {
+                                "name": action.name,
+                                "arguments": json.dumps(action.args),
+                            },
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+    }
+
+
+def _final_message_response(model_alias: str, text: str) -> dict:
+    return {
+        "id": f"chatcmpl_{uuid.uuid4().hex}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model_alias,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": text},
+                "finish_reason": "stop",
+            }
+        ],
+    }
+
+
+async def _emulation_stream(model_alias, client, request, tools, allowed, settings) -> AsyncIterator[str]:
+    result = await run_emulation_turn(
+        client,
+        tools,
+        request.messages,
+        allowed,
+        max_reasks=settings.max_reasks,
+        max_observation_chars=settings.max_observation_chars,
+    )
+    text = result.text if isinstance(result, FinalAnswer) else json.dumps(result.args)
+    yield f"data: {json.dumps({'choices': [{'index': 0, 'delta': {'content': text}, 'finish_reason': 'stop'}]})}\n\n"
+    yield "data: [DONE]\n\n"
 
 
 def create_app(
@@ -67,6 +127,29 @@ def create_app(
         client: SubstrateCopilotClient = Depends(get_copilot_client),
     ):
         try:
+            allowed = settings.read_only_tool_names
+            emulation_tools = filter_tools(request.tools, allowed)
+            if emulation_tools:
+                if request.stream:
+                    return StreamingResponse(
+                        _emulation_stream(settings.model_alias, client, request, emulation_tools, allowed, settings),
+                        media_type="text/event-stream",
+                    )
+                try:
+                    result = await run_emulation_turn(
+                        client,
+                        emulation_tools,
+                        request.messages,
+                        allowed,
+                        max_reasks=settings.max_reasks,
+                        max_observation_chars=settings.max_observation_chars,
+                    )
+                except SubstrateCopilotError as exc:
+                    raise HTTPException(status_code=502, detail=str(exc)) from exc
+                if isinstance(result, ToolAction):
+                    return JSONResponse(_tool_calls_response(settings.model_alias, result))
+                return JSONResponse(_final_message_response(settings.model_alias, result.text))
+
             translated = translate_openai_request(request)
             session = _persistent_session(app, raw_request, request.model, request.user)
             if request.stream:

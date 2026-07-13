@@ -43,6 +43,17 @@ class FakeCopilotClient:
         yield " world"
 
 
+class ScriptedChatClient(FakeCopilotClient):
+    def __init__(self, replies: list[str]):
+        super().__init__()
+        self._replies = replies
+
+    async def chat(self, prompt: str, additional_context: list[str], session: object | None = None) -> str:
+        self.calls.append((prompt, additional_context))
+        self.sessions.append(session)
+        return self._replies.pop(0)
+
+
 class FailingStreamCopilotClient(FakeCopilotClient):
     async def chat_stream(
         self,
@@ -466,3 +477,67 @@ def test_responses_requires_final_user_message() -> None:
 
     assert response.status_code == 400
     assert response.json()["detail"] == "The final Responses input message must be a user message."
+
+
+READ_TOOL_PAYLOAD = {
+    "type": "function",
+    "function": {
+        "name": "read",
+        "description": "Read a file",
+        "parameters": {"type": "object", "properties": {"filePath": {"type": "string"}}},
+    },
+}
+
+
+def test_chat_completions_emits_tool_call() -> None:
+    fake = ScriptedChatClient(['{"action": "read", "args": {"filePath": "app.py"}}'])
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "m365-copilot",
+            "tools": [READ_TOOL_PAYLOAD],
+            "messages": [{"role": "user", "content": "summarize app.py"}],
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    choice = body["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    call = choice["message"]["tool_calls"][0]
+    assert call["function"]["name"] == "read"
+    assert json.loads(call["function"]["arguments"]) == {"filePath": "app.py"}
+    assert call["id"].startswith("call_")
+
+
+def test_chat_completions_emits_final_after_tool_result() -> None:
+    fake = ScriptedChatClient(["The file defines create_app()."])
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "m365-copilot",
+            "tools": [READ_TOOL_PAYLOAD],
+            "messages": [
+                {"role": "user", "content": "summarize app.py"},
+                {"role": "assistant", "content": None, "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "read", "arguments": "{\"filePath\": \"app.py\"}"}}]},
+                {"role": "tool", "tool_call_id": "c1", "content": "def create_app(): ..."},
+            ],
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    choice = body["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert choice["message"]["content"] == "The file defines create_app()."
+
+
+def test_chat_completions_without_tools_uses_plain_path() -> None:
+    fake = FakeCopilotClient()
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "m365-copilot", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"] == "copilot reply"
