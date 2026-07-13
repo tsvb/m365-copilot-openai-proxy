@@ -29,7 +29,12 @@ def create_app(
     app.state.token_store = AccessTokenStore(resolved_settings.access_token)
     app.state.session_store = PersistentSessionStore()
     app.state.copilot_client_factory = copilot_client_factory or (
-        lambda: SubstrateCopilotClient(app.state.token_store.get(), resolved_settings.time_zone)
+        lambda: SubstrateCopilotClient(
+            app.state.token_store.get(),
+            resolved_settings.time_zone,
+            scenario=resolved_settings.scenario,
+            license_type=resolved_settings.license_type,
+        )
     )
 
     def get_settings() -> Settings:

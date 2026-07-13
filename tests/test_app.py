@@ -151,7 +151,7 @@ def test_default_client_factory_reloads_token_from_env(tmp_path, monkeypatch) ->
     seen_tokens: list[str] = []
 
     class RecordingCopilotClient(FakeCopilotClient):
-        def __init__(self, access_token: str, _time_zone: str):
+        def __init__(self, access_token: str, _time_zone: str, scenario: str = "", license_type: str = ""):
             super().__init__()
             seen_tokens.append(access_token)
 
@@ -502,3 +502,38 @@ def test_ws_url_honors_custom_scenario_and_license() -> None:
     url = client._ws_url("conv", "sess", "req")
     assert "scenario=OfficeWebIncludedCopilot" in url
     assert "licenseType=Starter" in url
+
+
+def test_factory_passes_scenario_and_license_to_client(tmp_path, monkeypatch) -> None:
+    token = make_jwt(int(time.time()) + 3600)
+    env_path = tmp_path / ".env"
+    env_path.write_text(f"M365_ACCESS_TOKEN={token}\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    seen: dict = {}
+
+    class RecordingCopilotClient(FakeCopilotClient):
+        def __init__(self, access_token, time_zone, scenario, license_type):
+            super().__init__()
+            seen["scenario"] = scenario
+            seen["license_type"] = license_type
+
+    monkeypatch.setattr(
+        "m365_copilot_openai_proxy.app.SubstrateCopilotClient",
+        RecordingCopilotClient,
+    )
+    settings = Settings(
+        M365_ACCESS_TOKEN=token,
+        M365_SCENARIO="OfficeWebPaidCopilot",
+        M365_LICENSE_TYPE="Premium",
+    )
+    app = create_app(settings=settings)
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "ignored", "messages": [{"role": "user", "content": "Hello"}]},
+    )
+
+    assert response.status_code == 200
+    assert seen == {"scenario": "OfficeWebPaidCopilot", "license_type": "Premium"}
