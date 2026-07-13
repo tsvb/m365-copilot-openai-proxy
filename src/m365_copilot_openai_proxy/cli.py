@@ -10,6 +10,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from urllib.parse import unquote
 
 import httpx
 import uvicorn
@@ -118,6 +119,169 @@ async def _cdp_capture_websocket_token(port: int, timeout_seconds: int) -> str |
         except Exception:
             await asyncio.sleep(1)
             continue
+    return None
+
+
+_CDP_FOCUS_INPUT_JS = """
+(() => {
+    const selectors = [
+        '[aria-label="Message Copilot"]',
+        '[data-testid*="input"]',
+        'textarea',
+        '[contenteditable="true"]',
+        '[role="textbox"]',
+    ];
+    for (const selector of selectors) {
+        const el = document.querySelector(selector);
+        if (el) { el.focus(); return true; }
+    }
+    return false;
+})()
+"""
+
+
+async def _cdp_nudge_page(ws, session_id: str, next_id) -> None:
+    """Focus the Copilot message box and type one throwaway character.
+
+    The chathub WebSocket is created lazily on input focus, not on page load, so
+    this is what triggers the connection whose URL carries the fresh token.
+    ``Network.enable`` must already be active on this session before calling this,
+    or the resulting ``webSocketCreated`` event can be missed.
+    """
+    await ws.send(json.dumps({
+        "id": next_id(),
+        "method": "Runtime.evaluate",
+        "params": {"expression": _CDP_FOCUS_INPUT_JS},
+        "sessionId": session_id,
+    }))
+    await ws.send(json.dumps({
+        "id": next_id(),
+        "method": "Input.insertText",
+        "params": {"text": " "},
+        "sessionId": session_id,
+    }))
+    for event_type in ("keyDown", "keyUp"):
+        await ws.send(json.dumps({
+            "id": next_id(),
+            "method": "Input.dispatchKeyEvent",
+            "params": {
+                "type": event_type,
+                "key": "Backspace",
+                "code": "Backspace",
+                "windowsVirtualKeyCode": 8,
+                "nativeVirtualKeyCode": 8,
+            },
+            "sessionId": session_id,
+        }))
+
+
+async def _cdp_reload_and_capture_token(cdp_port: int, timeout_seconds: int) -> str | None:
+    """Capture a fresh Substrate token by reloading and nudging the Copilot tab.
+
+    Storage-based extraction fails on tenants that keep MSAL tokens encrypted at
+    rest, so the plaintext token is only exposed in the Copilot chathub WebSocket
+    URL. That socket is created lazily when the message box is focused, and if one
+    already exists a nudge alone will not create a new one. So this reloads the
+    signed-in M365 Copilot tab (tearing down any existing socket), waits for the
+    reload to settle, then focuses the input and types one throwaway character to
+    force a fresh connection, and reads ``access_token`` from the resulting URL.
+
+    It connects at the browser level (``/json/version``) and keeps auto-attach on
+    so it follows the page across the reload's target changes.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            version = (await client.get(f"http://localhost:{cdp_port}/json/version")).json()
+    except Exception:
+        return None
+    browser_ws = version.get("webSocketDebuggerUrl")
+    if not browser_ws:
+        return None
+
+    message_id = 10
+
+    def next_id() -> int:
+        nonlocal message_id
+        message_id += 1
+        return message_id
+
+    targets_request_id = 3
+    nudge_delay_seconds = 4.0
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    page_session: str | None = None
+    reloaded = False
+    nudged = False
+    nudge_at: float | None = None
+    try:
+        async with websockets.connect(browser_ws, max_size=None) as ws:
+            await ws.send(json.dumps({
+                "id": next_id(),
+                "method": "Target.setAutoAttach",
+                "params": {"autoAttach": True, "waitForDebuggerOnStart": False, "flatten": True},
+            }))
+            await ws.send(json.dumps({"id": targets_request_id, "method": "Target.getTargets"}))
+            while loop.time() < deadline:
+                if reloaded and not nudged and nudge_at is not None and loop.time() >= nudge_at and page_session:
+                    await _cdp_nudge_page(ws, page_session, next_id)
+                    nudged = True
+
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    continue
+                msg = json.loads(raw)
+
+                if msg.get("id") == targets_request_id:
+                    infos = msg.get("result", {}).get("targetInfos", [])
+                    page = next(
+                        (
+                            t for t in infos
+                            if t.get("type") == "page"
+                            and t.get("url", "").startswith("https://m365.cloud.microsoft/")
+                        ),
+                        None,
+                    )
+                    if page:
+                        await ws.send(json.dumps({
+                            "id": next_id(),
+                            "method": "Target.attachToTarget",
+                            "params": {"targetId": page["targetId"], "flatten": True},
+                        }))
+                    continue
+
+                method = msg.get("method")
+                if method == "Target.attachedToTarget":
+                    params = msg.get("params", {})
+                    info = params.get("targetInfo", {})
+                    if (
+                        info.get("type") == "page"
+                        and info.get("url", "").startswith("https://m365.cloud.microsoft/")
+                    ):
+                        # Track the latest Copilot page session so the nudge lands
+                        # on the post-reload page, not the torn-down one. Enable
+                        # Network now (well before the nudge) so the chathub
+                        # webSocketCreated event is not missed.
+                        page_session = params.get("sessionId")
+                        await ws.send(json.dumps({"id": next_id(), "method": "Network.enable", "sessionId": page_session}))
+                        if not reloaded:
+                            await ws.send(json.dumps({"id": next_id(), "method": "Page.enable", "sessionId": page_session}))
+                            await ws.send(json.dumps({"id": next_id(), "method": "Page.reload", "sessionId": page_session}))
+                            reloaded = True
+                            nudge_at = loop.time() + nudge_delay_seconds
+                    continue
+                if method == "Network.webSocketCreated":
+                    url = msg.get("params", {}).get("url", "")
+                    if "substrate.office.com" not in url:
+                        continue
+                    match = re.search(r"[?&]access_token=([^&]+)", url)
+                    if not match:
+                        continue
+                    token = unquote(match.group(1))
+                    if _is_substrate_token(token):
+                        return token
+    except Exception:
+        return None
     return None
 
 
@@ -254,7 +418,12 @@ def _is_substrate_token(token: str) -> bool:
 
 
 def _try_auto_refresh(cdp_port: int, *, allow_nudge: bool = True) -> bool:
-    token = asyncio.run(_cdp_extract_token(cdp_port, allow_nudge=allow_nudge))
+    # Storage extraction is read-only and works on tenants that keep the token in
+    # plaintext. When it fails (encrypted MSAL cache), fall back to reloading and
+    # nudging the Copilot tab, which is the only page interaction we perform.
+    token = asyncio.run(_cdp_extract_token(cdp_port, allow_nudge=False))
+    if not token and allow_nudge:
+        token = asyncio.run(_cdp_reload_and_capture_token(cdp_port, timeout_seconds=45))
     if not token:
         return False
     _write_token(token)

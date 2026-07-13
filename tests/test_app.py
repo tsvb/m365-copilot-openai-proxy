@@ -479,6 +479,50 @@ def test_responses_requires_final_user_message() -> None:
     assert response.json()["detail"] == "The final Responses input message must be a user message."
 
 
+def test_cli_auto_refresh_falls_back_to_reload_capture(tmp_path, monkeypatch) -> None:
+    from m365_copilot_openai_proxy import cli
+
+    token = make_jwt(int(time.time()) + 3600)
+    monkeypatch.chdir(tmp_path)
+    reload_calls = 0
+
+    async def fake_extract(_port, *, allow_nudge=True):
+        return None
+
+    async def fake_reload(_port, timeout_seconds):
+        nonlocal reload_calls
+        reload_calls += 1
+        return token
+
+    monkeypatch.setattr(cli, "_cdp_extract_token", fake_extract)
+    monkeypatch.setattr(cli, "_cdp_reload_and_capture_token", fake_reload)
+
+    assert cli._try_auto_refresh(9222) is True
+    assert reload_calls == 1
+    assert cli._read_token() == token
+
+
+def test_cli_auto_refresh_skips_reload_capture_when_nudge_disallowed(tmp_path, monkeypatch) -> None:
+    from m365_copilot_openai_proxy import cli
+
+    monkeypatch.chdir(tmp_path)
+    reload_called = False
+
+    async def fake_extract(_port, *, allow_nudge=True):
+        return None
+
+    async def fake_reload(_port, timeout_seconds):
+        nonlocal reload_called
+        reload_called = True
+        return make_jwt(int(time.time()) + 3600)
+
+    monkeypatch.setattr(cli, "_cdp_extract_token", fake_extract)
+    monkeypatch.setattr(cli, "_cdp_reload_and_capture_token", fake_reload)
+
+    assert cli._try_auto_refresh(9222, allow_nudge=False) is False
+    assert reload_called is False
+
+
 READ_TOOL_PAYLOAD = {
     "type": "function",
     "function": {
