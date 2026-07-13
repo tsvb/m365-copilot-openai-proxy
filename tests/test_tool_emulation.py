@@ -109,3 +109,87 @@ def test_parse_empty_is_final_empty() -> None:
 def test_extract_json_object_ignores_non_object() -> None:
     assert extract_json_object("[1, 2, 3]") is None
     assert extract_json_object("just prose") is None
+
+
+from m365_copilot_openai_proxy.tool_emulation import filter_tools, render_action_prompt
+
+
+def _request(payload: dict) -> OpenAIChatRequest:
+    return OpenAIChatRequest.model_validate(payload)
+
+
+READ_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "read",
+        "description": "Read a file from disk",
+        "parameters": {"type": "object", "properties": {"filePath": {"type": "string"}}},
+    },
+}
+WRITE_TOOL = {
+    "type": "function",
+    "function": {"name": "write", "description": "Write a file", "parameters": {}},
+}
+
+
+def test_filter_tools_keeps_only_allowlisted() -> None:
+    request = _request({"model": "m", "tools": [READ_TOOL, WRITE_TOOL], "messages": [{"role": "user", "content": "hi"}]})
+    kept = filter_tools(request.tools, frozenset({"read"}))
+    assert [t.function.name for t in kept] == ["read"]
+
+
+def test_render_prompt_lists_actions_and_omits_filtered() -> None:
+    request = _request({"model": "m", "tools": [READ_TOOL], "messages": [{"role": "user", "content": "summarize app.py"}]})
+    prompt = render_action_prompt(filter_tools(request.tools, frozenset({"read"})), request.messages, max_observation_chars=100)
+    assert "read(filePath)" in prompt
+    assert "Read a file from disk" in prompt
+    assert "write" not in prompt
+    assert "User: summarize app.py" in prompt
+    assert '{"action":' in prompt  # instruction example present
+
+
+def test_render_prompt_folds_tool_result_as_observation() -> None:
+    request = _request(
+        {
+            "model": "m",
+            "tools": [READ_TOOL],
+            "messages": [
+                {"role": "user", "content": "summarize app.py"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "read", "arguments": "{\"filePath\": \"app.py\"}"}}],
+                },
+                {"role": "tool", "tool_call_id": "c1", "content": "print('hi')"},
+            ],
+        }
+    )
+    prompt = render_action_prompt(filter_tools(request.tools, frozenset({"read"})), request.messages, max_observation_chars=100)
+    assert "read(filePath=app.py)" in prompt
+    assert "print('hi')" in prompt
+    assert "Observation" in prompt
+
+
+def test_render_prompt_caps_large_observation() -> None:
+    big = "x" * 500
+    request = _request(
+        {
+            "model": "m",
+            "tools": [READ_TOOL],
+            "messages": [
+                {"role": "user", "content": "read it"},
+                {"role": "assistant", "content": None, "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "read", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": "c1", "content": big},
+            ],
+        }
+    )
+    prompt = render_action_prompt(filter_tools(request.tools, frozenset({"read"})), request.messages, max_observation_chars=100)
+    assert "x" * 100 in prompt
+    assert "x" * 200 not in prompt
+    assert "truncated" in prompt
+
+
+def test_render_prompt_includes_reask_note() -> None:
+    request = _request({"model": "m", "tools": [READ_TOOL], "messages": [{"role": "user", "content": "hi"}]})
+    prompt = render_action_prompt(filter_tools(request.tools, frozenset({"read"})), request.messages, max_observation_chars=100, reask="TRY AGAIN NOTE")
+    assert "TRY AGAIN NOTE" in prompt
