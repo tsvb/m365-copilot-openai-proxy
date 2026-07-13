@@ -249,3 +249,43 @@ def test_run_reasks_on_garbage_then_takes_prose() -> None:
         run_emulation_turn(client, [], _msgs("q"), frozenset({"read"}), max_reasks=2, max_observation_chars=100)
     )
     assert result == FinalAnswer(text="The answer is 42.")
+
+
+def test_run_reasks_on_duplicate_action() -> None:
+    # Build messages with prior read action for a.py
+    messages = [
+        OpenAIMessage.model_validate({"role": "user", "content": "read a.py"}),
+        OpenAIMessage.model_validate({
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "read", "arguments": "{\"filePath\": \"a.py\"}"}}
+            ],
+        }),
+        OpenAIMessage.model_validate({"role": "tool", "tool_call_id": "c1", "content": "x = 1"}),
+    ]
+
+    # Client returns duplicate action first, then final answer
+    client = ScriptedClient(
+        ['{"action": "read", "args": {"filePath": "a.py"}}', "It defines x."]
+    )
+
+    # Get tools
+    tools = _request({"model": "m", "tools": [READ_TOOL], "messages": [{"role": "user", "content": "x"}]}).tools
+
+    # Run the emulation
+    result = asyncio.run(
+        run_emulation_turn(
+            client,
+            filter_tools(tools, frozenset({"read"})),
+            messages,
+            frozenset({"read"}),
+            max_reasks=2,
+            max_observation_chars=100
+        )
+    )
+
+    # Assertions
+    assert result == FinalAnswer(text="It defines x.")
+    assert len(client.prompts) == 2
+    assert "already requested" in client.prompts[1]
