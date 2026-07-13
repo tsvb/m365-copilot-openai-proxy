@@ -51,3 +51,61 @@ def test_settings_default_read_only_tools() -> None:
     assert "read" in settings.read_only_tool_names
     assert "glob" in settings.read_only_tool_names
     assert "grep" in settings.read_only_tool_names
+
+
+from m365_copilot_openai_proxy.tool_emulation import (
+    FinalAnswer,
+    ToolAction,
+    UnavailableAction,
+    extract_json_object,
+    parse_copilot_turn,
+)
+
+ALLOWED = frozenset({"read", "glob", "grep"})
+
+
+def test_parse_clean_action() -> None:
+    result = parse_copilot_turn('{"action": "read", "args": {"filePath": "a.py"}}', ALLOWED)
+    assert result == ToolAction(name="read", args={"filePath": "a.py"})
+
+
+def test_parse_fenced_action() -> None:
+    text = '```json\n{"action": "grep", "args": {"pattern": "def"}}\n```'
+    result = parse_copilot_turn(text, ALLOWED)
+    assert result == ToolAction(name="grep", args={"pattern": "def"})
+
+
+def test_parse_prose_final() -> None:
+    result = parse_copilot_turn("The file defines two functions.", ALLOWED)
+    assert result == FinalAnswer(text="The file defines two functions.")
+
+
+def test_parse_prose_containing_json_block_is_final() -> None:
+    text = "Here is the config you asked about:\n```json\n{\"a\": 1}\n```\nThat is all."
+    result = parse_copilot_turn(text, ALLOWED)
+    assert isinstance(result, FinalAnswer)
+
+
+def test_parse_unknown_tool_is_unavailable() -> None:
+    result = parse_copilot_turn('{"action": "write", "args": {"filePath": "a.py"}}', ALLOWED)
+    assert result == UnavailableAction(name="write")
+
+
+def test_parse_explicit_final_action() -> None:
+    result = parse_copilot_turn('{"action": "final", "args": {"text": "done"}}', ALLOWED)
+    assert result == FinalAnswer(text="done")
+
+
+def test_parse_malformed_json_is_final() -> None:
+    result = parse_copilot_turn('{"action": "read", "args":', ALLOWED)
+    assert isinstance(result, FinalAnswer)
+
+
+def test_parse_empty_is_final_empty() -> None:
+    result = parse_copilot_turn("   ", ALLOWED)
+    assert result == FinalAnswer(text="")
+
+
+def test_extract_json_object_ignores_non_object() -> None:
+    assert extract_json_object("[1, 2, 3]") is None
+    assert extract_json_object("just prose") is None
