@@ -55,10 +55,12 @@ def test_settings_default_read_only_tools() -> None:
 
 from m365_copilot_openai_proxy.tool_emulation import (
     FinalAnswer,
+    MalformedAction,
     ToolAction,
     UnavailableAction,
     extract_json_object,
     parse_copilot_turn,
+    run_emulation_turn,
 )
 
 ALLOWED = frozenset({"read", "glob", "grep"})
@@ -96,9 +98,14 @@ def test_parse_explicit_final_action() -> None:
     assert result == FinalAnswer(text="done")
 
 
-def test_parse_malformed_json_is_final() -> None:
+def test_parse_malformed_json_is_malformed() -> None:
     result = parse_copilot_turn('{"action": "read", "args":', ALLOWED)
-    assert isinstance(result, FinalAnswer)
+    assert isinstance(result, MalformedAction)
+
+
+def test_parse_action_name_is_case_insensitive() -> None:
+    result = parse_copilot_turn('{"action": "Read", "args": {"filePath": "a.py"}}', ALLOWED)
+    assert result == ToolAction(name="read", args={"filePath": "a.py"})
 
 
 def test_parse_empty_is_final_empty() -> None:
@@ -197,8 +204,6 @@ def test_render_prompt_includes_reask_note() -> None:
 
 import asyncio
 
-from m365_copilot_openai_proxy.tool_emulation import run_emulation_turn
-
 
 class ScriptedClient:
     def __init__(self, replies: list[str]) -> None:
@@ -289,3 +294,22 @@ def test_run_reasks_on_duplicate_action() -> None:
     assert result == FinalAnswer(text="It defines x.")
     assert len(client.prompts) == 2
     assert "already requested" in client.prompts[1]
+
+
+def test_run_reasks_on_malformed_then_final() -> None:
+    client = ScriptedClient(['{"action": "read"', "It is a config file."])
+    result = asyncio.run(
+        run_emulation_turn(client, [], _msgs("q"), frozenset({"read"}), max_reasks=2, max_observation_chars=100)
+    )
+    assert result == FinalAnswer(text="It is a config file.")
+    assert len(client.prompts) == 2
+
+
+def test_run_exhausted_reasks_returns_generic_message() -> None:
+    from m365_copilot_openai_proxy.tool_emulation import _FALLBACK_MESSAGE
+    client = ScriptedClient(['{"action": "bash", "args": {}}'] * 3)
+    result = asyncio.run(
+        run_emulation_turn(client, [], _msgs("do it"), frozenset({"read"}), max_reasks=2, max_observation_chars=100)
+    )
+    assert result == FinalAnswer(text=_FALLBACK_MESSAGE)
+    assert len(client.prompts) == 3

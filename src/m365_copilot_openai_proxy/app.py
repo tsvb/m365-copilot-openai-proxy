@@ -14,7 +14,7 @@ from .substrate_client import SubstrateCopilotClient, SubstrateCopilotError
 from .token_store import AccessTokenStore
 from .models import AnthropicMessagesRequest, OpenAIChatRequest, OpenAIResponsesRequest
 from .translator import translate_anthropic_request, translate_openai_request, translate_responses_request
-from .tool_emulation import FinalAnswer, ToolAction, filter_tools, run_emulation_turn
+from .tool_emulation import ToolAction, filter_tools, run_emulation_turn
 
 _PERSIST_MODEL_SUFFIX = ":persist"
 _SESSION_ID_HEADER = "x-m365-session-id"

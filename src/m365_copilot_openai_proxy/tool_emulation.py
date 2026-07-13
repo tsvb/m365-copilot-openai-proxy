@@ -23,6 +23,11 @@ class UnavailableAction:
     name: str
 
 
+@dataclass(frozen=True)
+class MalformedAction:
+    text: str
+
+
 def _strip_fences(text: str) -> str:
     stripped = text.strip()
     if stripped.startswith("```"):
@@ -49,10 +54,10 @@ def extract_json_object(text: str) -> dict[str, Any] | None:
 def parse_copilot_turn(
     text: str,
     allowed_names: frozenset[str],
-) -> ToolAction | FinalAnswer | UnavailableAction:
+) -> ToolAction | FinalAnswer | UnavailableAction | MalformedAction:
     obj = extract_json_object(text)
     if obj is not None and isinstance(obj.get("action"), str):
-        name = obj["action"].strip()
+        name = obj["action"].strip().lower()
         args = obj.get("args")
         if not isinstance(args, dict):
             args = {}
@@ -61,6 +66,10 @@ def parse_copilot_turn(
         if name in allowed_names:
             return ToolAction(name=name, args=args)
         return UnavailableAction(name=name)
+    # A message that looks like a JSON action attempt but did not resolve to a
+    # valid action is malformed, not a prose final answer.
+    if _strip_fences(text).strip().startswith("{"):
+        return MalformedAction(text=text.strip())
     return FinalAnswer(text=text.strip())
 
 
@@ -189,6 +198,7 @@ _REASK_DUPLICATE = (
     "Note: you already requested that information (see the observation above). Continue "
     "with a different action or give your final answer as plain prose."
 )
+_FALLBACK_MESSAGE = "I could not complete that request with the available read-only actions."
 
 
 def _reask_unavailable(name: str, allowed_names: frozenset[str]) -> str:
@@ -227,17 +237,22 @@ async def run_emulation_turn(
 ) -> ToolAction | FinalAnswer:
     prior_keys = _prior_action_keys(messages)
     reask: str | None = None
-    last_text = ""
 
     for _ in range(max_reasks + 1):
         prompt = render_action_prompt(
             tools, messages, max_observation_chars=max_observation_chars, reask=reask
         )
         last_text = await client.chat(prompt, [])
+        if not last_text.strip():
+            reask = _REASK_STRICT
+            continue
         result = parse_copilot_turn(last_text, allowed_names)
 
         if isinstance(result, FinalAnswer):
             return result
+        if isinstance(result, MalformedAction):
+            reask = _REASK_STRICT
+            continue
         if isinstance(result, UnavailableAction):
             reask = _reask_unavailable(result.name, allowed_names)
             continue
@@ -246,4 +261,4 @@ async def run_emulation_turn(
             continue
         return result
 
-    return FinalAnswer(text=last_text.strip())
+    return FinalAnswer(text=_FALLBACK_MESSAGE)
