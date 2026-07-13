@@ -43,6 +43,17 @@ class FakeCopilotClient:
         yield " world"
 
 
+class ScriptedChatClient(FakeCopilotClient):
+    def __init__(self, replies: list[str]):
+        super().__init__()
+        self._replies = replies
+
+    async def chat(self, prompt: str, additional_context: list[str], session: object | None = None) -> str:
+        self.calls.append((prompt, additional_context))
+        self.sessions.append(session)
+        return self._replies.pop(0)
+
+
 class FailingStreamCopilotClient(FakeCopilotClient):
     async def chat_stream(
         self,
@@ -466,6 +477,179 @@ def test_responses_requires_final_user_message() -> None:
 
     assert response.status_code == 400
     assert response.json()["detail"] == "The final Responses input message must be a user message."
+
+
+def test_cli_auto_refresh_falls_back_to_reload_capture(tmp_path, monkeypatch) -> None:
+    from m365_copilot_openai_proxy import cli
+
+    token = make_jwt(int(time.time()) + 3600)
+    monkeypatch.chdir(tmp_path)
+    reload_calls = 0
+    extract_nudge_flags: list[bool] = []
+
+    async def fake_extract(_port, *, allow_nudge=True):
+        extract_nudge_flags.append(allow_nudge)
+        return None
+
+    async def fake_reload(_port, timeout_seconds):
+        nonlocal reload_calls
+        reload_calls += 1
+        return token
+
+    monkeypatch.setattr(cli, "_cdp_extract_token", fake_extract)
+    monkeypatch.setattr(cli, "_cdp_reload_and_capture_token", fake_reload)
+
+    assert cli._try_auto_refresh(9222) is True
+    assert reload_calls == 1
+    assert extract_nudge_flags == [False]  # storage extraction must not nudge
+    assert cli._read_token() == token
+
+
+def test_cli_auto_refresh_skips_reload_capture_when_nudge_disallowed(tmp_path, monkeypatch) -> None:
+    from m365_copilot_openai_proxy import cli
+
+    monkeypatch.chdir(tmp_path)
+    reload_called = False
+
+    async def fake_extract(_port, *, allow_nudge=True):
+        return None
+
+    async def fake_reload(_port, timeout_seconds):
+        nonlocal reload_called
+        reload_called = True
+        return make_jwt(int(time.time()) + 3600)
+
+    monkeypatch.setattr(cli, "_cdp_extract_token", fake_extract)
+    monkeypatch.setattr(cli, "_cdp_reload_and_capture_token", fake_reload)
+
+    assert cli._try_auto_refresh(9222, allow_nudge=False) is False
+    assert reload_called is False
+
+
+READ_TOOL_PAYLOAD = {
+    "type": "function",
+    "function": {
+        "name": "read",
+        "description": "Read a file",
+        "parameters": {"type": "object", "properties": {"filePath": {"type": "string"}}},
+    },
+}
+
+
+def test_chat_completions_emits_tool_call() -> None:
+    fake = ScriptedChatClient(['{"action": "read", "args": {"filePath": "app.py"}}'])
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "m365-copilot",
+            "tools": [READ_TOOL_PAYLOAD],
+            "messages": [{"role": "user", "content": "summarize app.py"}],
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    choice = body["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    call = choice["message"]["tool_calls"][0]
+    assert call["function"]["name"] == "read"
+    assert json.loads(call["function"]["arguments"]) == {"filePath": "app.py"}
+    assert call["id"].startswith("call_")
+
+
+def test_chat_completions_emits_final_after_tool_result() -> None:
+    fake = ScriptedChatClient(["The file defines create_app()."])
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "m365-copilot",
+            "tools": [READ_TOOL_PAYLOAD],
+            "messages": [
+                {"role": "user", "content": "summarize app.py"},
+                {"role": "assistant", "content": None, "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "read", "arguments": "{\"filePath\": \"app.py\"}"}}]},
+                {"role": "tool", "tool_call_id": "c1", "content": "def create_app(): ..."},
+            ],
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    choice = body["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert choice["message"]["content"] == "The file defines create_app()."
+
+
+def test_chat_completions_without_tools_uses_plain_path() -> None:
+    fake = FakeCopilotClient()
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "m365-copilot", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"] == "copilot reply"
+
+
+class FailingStreamChatClient(FakeCopilotClient):
+    async def chat(self, prompt: str, additional_context: list[str], session: object | None = None) -> str:
+        raise SubstrateCopilotError("upstream broke")
+
+
+def _collect_stream(client, payload) -> str:
+    with client.stream("POST", "/v1/chat/completions", json=payload) as response:
+        assert response.status_code == 200
+        return "".join(
+            chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+            for chunk in response.iter_text()
+        )
+
+
+def test_streaming_tool_call_emits_tool_calls_delta() -> None:
+    fake = ScriptedChatClient(['{"action": "read", "args": {"filePath": "app.py"}}'])
+    client = build_client(fake)
+    payload = {
+        "model": "m365-copilot",
+        "stream": True,
+        "tools": [READ_TOOL_PAYLOAD],
+        "messages": [{"role": "user", "content": "summarize app.py"}],
+    }
+    body = _collect_stream(client, payload)
+    assert '"tool_calls"' in body
+    assert '"name": "read"' in body
+    assert '"finish_reason": "tool_calls"' in body
+    assert "data: [DONE]" in body
+
+
+def test_streaming_final_emits_content_delta() -> None:
+    fake = ScriptedChatClient(["It defines create_app()."])
+    client = build_client(fake)
+    payload = {
+        "model": "m365-copilot",
+        "stream": True,
+        "tools": [READ_TOOL_PAYLOAD],
+        "messages": [
+            {"role": "user", "content": "summarize app.py"},
+            {"role": "assistant", "content": None, "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "read", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "def create_app(): ..."},
+        ],
+    }
+    body = _collect_stream(client, payload)
+    assert '"content": "It defines create_app()."' in body
+    assert '"finish_reason": "stop"' in body
+    assert "data: [DONE]" in body
+
+
+def test_streaming_emulation_emits_error_on_upstream_failure() -> None:
+    client = build_client(FailingStreamChatClient())
+    payload = {
+        "model": "m365-copilot",
+        "stream": True,
+        "tools": [READ_TOOL_PAYLOAD],
+        "messages": [{"role": "user", "content": "summarize app.py"}],
+    }
+    body = _collect_stream(client, payload)
+    assert '"type": "upstream_error"' in body
+    assert "data: [DONE]" in body
 
 
 def test_settings_default_to_work_mode() -> None:

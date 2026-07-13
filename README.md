@@ -70,22 +70,42 @@ Use these settings for any OpenAI-compatible client:
 
 ### OpenCode
 
+OpenCode's OpenAI-compatible provider appends `/chat/completions` to the base
+URL, so the base URL must include the `/v1` suffix. Add a custom provider to
+`~/.config/opencode/opencode.jsonc`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "m365copilot": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "M365 Copilot Proxy",
+      "options": {
+        "baseURL": "http://127.0.0.1:8000/v1",
+        "apiKey": "dummy"
+      },
+      "models": {
+        "m365-copilot": { "name": "M365 Copilot" },
+        "m365-copilot:persist": { "name": "M365 Copilot (persistent)" }
+      }
+    }
+  }
+}
+```
+
+Then select model `m365copilot/m365-copilot` (or `m365copilot/m365-copilot:persist`
+for persistent Copilot-side memory).
+
+Read-only file interaction works: the proxy emulates OpenAI tool calls for
+OpenCode's `read`, `glob`, `grep`, and `list` tools, so Copilot can inspect your
+codebase. Write, edit, and shell tools are not emulated.
+
+For headless runs, pass `--auto` so OpenCode auto-approves the read permission
+instead of hanging on the prompt:
+
 ```powershell
-$env:OPENAI_BASE_URL = "http://127.0.0.1:8000"
-$env:OPENAI_API_KEY = "dummy"
-opencode
-```
-
-Select **OpenAI API** as the provider, then use:
-
-```text
-m365-copilot
-```
-
-For persistent Copilot-side conversation memory:
-
-```text
-m365-copilot:persist
+opencode run "Read hello.py and summarize it." -m m365copilot/m365-copilot --auto
 ```
 
 ### Continue
@@ -290,7 +310,7 @@ license**. Accounts without one should set `M365_WORK_MODE=false` (web grounding
 
 - This is an unofficial local proxy over the browser-facing M365 Copilot API.
 - Token refresh depends on a signed-in Edge profile.
-- Tool calls are not supported.
+- Tool calls are emulated for read-only tools only (`read`, `glob`, `grep`, `list`) via the OpenAI Chat Completions endpoint, for clients like OpenCode. Write, edit, and shell tools are not emulated, and other endpoints (`/v1/responses`, `/v1/messages`) do not emulate tools.
 - M365 data grounding (Work mode) requires a paid M365 Copilot license.
 - Token usage numbers are placeholders.
 - System prompts and prior conversation history are translated into plain text context.

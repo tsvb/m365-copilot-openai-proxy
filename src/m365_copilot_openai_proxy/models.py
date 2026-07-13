@@ -12,11 +12,44 @@ class ContentPart(BaseModel):
     text: str | None = None
 
 
+class FunctionSpec(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: str
+    description: str | None = None
+    parameters: dict[str, Any] | None = None
+
+
+class ToolSpec(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    type: str = "function"
+    function: FunctionSpec
+
+
+class ToolCallFunction(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: str
+    arguments: str = ""
+
+
+class ToolCall(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    type: str = "function"
+    function: ToolCallFunction
+
+
 class OpenAIMessage(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     role: Literal["system", "developer", "user", "assistant", "tool"]
-    content: str | list[ContentPart]
+    content: str | list[ContentPart] | None = None
+    tool_calls: list[ToolCall] | None = None
+    tool_call_id: str | None = None
+    name: str | None = None
 
 
 class OpenAIChatRequest(BaseModel):
@@ -27,6 +60,8 @@ class OpenAIChatRequest(BaseModel):
     stream: bool = False
     temperature: float | None = None
     user: str | None = None
+    tools: list[ToolSpec] | None = None
+    tool_choice: Any | None = None
 
 
 class AnthropicMessage(BaseModel):
