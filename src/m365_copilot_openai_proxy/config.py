@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     )
 
     access_token: str = Field(default="", alias="M365_ACCESS_TOKEN")
-    time_zone: str = Field(default="Asia/Tokyo", alias="M365_TIME_ZONE")
+    time_zone: str = Field(default="", alias="M365_TIME_ZONE")
     model_alias: str = Field(default="m365-copilot", alias="M365_MODEL_ALIAS")
     work_mode: bool = Field(default=True, alias="M365_WORK_MODE")
     read_only_tools: str = Field(default="read,glob,grep,list,ls", alias="M365_READ_ONLY_TOOLS")

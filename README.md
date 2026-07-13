@@ -294,7 +294,7 @@ Most users only need `.env` after the proxy captures a token.
 | Variable | Default | Description |
 |---|---|---|
 | `M365_ACCESS_TOKEN` | optional at startup | Browser WebSocket token. If missing, startup capture can fill `.env`. |
-| `M365_TIME_ZONE` | `Asia/Tokyo` | Optional. Time zone sent to Copilot. Usually no need to set this if `Asia/Tokyo` is correct. |
+| `M365_TIME_ZONE` | auto-detect | Optional. IANA time zone (e.g. `America/New_York`) used so Copilot renders times (meeting starts, etc.) in your zone. If unset, the proxy uses your machine's current UTC offset. Set an IANA name for a nicer displayed zone. |
 | `M365_MODEL_ALIAS` | `m365-copilot` | Optional. Model name returned by `/v1/models`. Usually no need to change this. |
 | `M365_WORK_MODE` | `true` | When true, connects in Copilot **Work mode** (Work IQ), which grounds answers in your Microsoft 365 data (mail, calendar, files, Teams). Set to `false` for web-only mode on accounts without a paid M365 Copilot license. |
 

@@ -4,12 +4,57 @@ import json
 import time
 import uuid
 from collections.abc import AsyncIterator
+from datetime import datetime
 from urllib.parse import quote
 
 import websockets
 
 from .session_store import PersistentSession
 from .token_store import decode_jwt_payload, is_substrate_token_claims
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover - zoneinfo is stdlib on 3.9+
+    ZoneInfo = None
+
+
+def _resolve_timezone(name: str) -> tuple[str, int]:
+    """Return (timezone_name, utc_offset_hours) for the substrate locationInfo.
+
+    Copilot uses the offset to render times (e.g. meeting start times). The offset
+    must match the user's zone, not a hardcoded value. When ``name`` is a valid IANA
+    zone we derive its current offset (honoring DST); otherwise we fall back to the
+    machine's local zone so times are still correct out of the box.
+    """
+    def _hours(offset) -> int:
+        return int(offset.total_seconds() // 3600) if offset else 0
+
+    local = datetime.now().astimezone()
+    local_offset = _hours(local.utcoffset())
+    if name:
+        if ZoneInfo is not None:
+            try:
+                return name, _hours(datetime.now(ZoneInfo(name)).utcoffset())
+            except Exception:
+                pass
+        # Named but unresolvable (e.g. no tz database): keep the name for display,
+        # use the machine's local offset for the math.
+        return name, local_offset
+    # Unset: synthesize a valid, recognized fixed-offset zone for the local offset.
+    # The machine's display name (e.g. "Eastern Daylight Time") is NOT a recognized
+    # zone id and makes the substrate return empty responses, so never send it.
+    return _fixed_offset_zone(local_offset), local_offset
+
+
+def _fixed_offset_zone(offset_hours: int) -> str:
+    """A recognized IANA zone id for a whole-hour UTC offset.
+
+    IANA's Etc/GMT zones use an inverted sign (Etc/GMT+4 == UTC-4).
+    """
+    if offset_hours == 0:
+        return "UTC"
+    sign = "+" if offset_hours < 0 else "-"
+    return f"Etc/GMT{sign}{abs(offset_hours)}"
 
 SIGNALR_SEP = "\x1e"
 _WS_BASE = "wss://substrate.office.com/m365Copilot/Chathub"
@@ -128,7 +173,7 @@ class SubstrateCopilotClient:
     def __init__(
         self,
         access_token: str,
-        time_zone: str = "Asia/Tokyo",
+        time_zone: str = "",
         work_mode: bool = True,
     ):
         if not access_token:
@@ -137,7 +182,7 @@ class SubstrateCopilotClient:
                 "or run `uv run copilot-openai-proxy set-token`."
             )
         self._token = access_token
-        self._time_zone = time_zone
+        self._time_zone, self._tz_offset_hours = _resolve_timezone(time_zone)
         self._work_mode = work_mode
         try:
             claims = decode_jwt_payload(access_token)
@@ -211,7 +256,7 @@ class SubstrateCopilotClient:
                     "text": text,
                     "entityAnnotationTypes": ["People", "File", "Event", "Email", "TeamsMessage"],
                     "requestId": req_id,
-                    "locationInfo": {"timeZoneOffset": 9, "timeZone": self._time_zone},
+                    "locationInfo": {"timeZoneOffset": self._tz_offset_hours, "timeZone": self._time_zone},
                     "locale": "en-us",
                     "messageType": "Chat",
                     "experienceType": "Default",

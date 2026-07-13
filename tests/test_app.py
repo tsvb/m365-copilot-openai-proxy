@@ -694,6 +694,34 @@ def test_web_mode_invoke_omits_enterprise_connectors() -> None:
     assert "disconnectBehavior" not in invoke
 
 
+def _location_info(invoke: str) -> dict:
+    payload = json.loads(invoke.rstrip("\x1e"))
+    return payload["arguments"][0]["message"]["locationInfo"]
+
+
+def test_timezone_offset_is_derived_not_hardcoded() -> None:
+    # The named zone flows through and the offset is derived (an int), not the old
+    # hardcoded Tokyo +9. Value is environment-dependent, so we assert type/name only.
+    client = SubstrateCopilotClient(make_jwt(int(time.time()) + 3600), time_zone="America/New_York")
+    loc = _location_info(client._chat_invoke("hi", "c", "s", "r", True))
+    assert loc["timeZone"] == "America/New_York"
+    assert isinstance(loc["timeZoneOffset"], int)
+
+
+def test_timezone_offset_matches_local_machine() -> None:
+    # Deterministic proof the offset is derived from the environment, not the old
+    # hardcoded Tokyo +9: it equals the machine's actual current UTC offset.
+    from datetime import datetime
+
+    expected = int(datetime.now().astimezone().utcoffset().total_seconds() // 3600)
+    client = SubstrateCopilotClient(make_jwt(int(time.time()) + 3600), time_zone="")
+    loc = _location_info(client._chat_invoke("hi", "c", "s", "r", True))
+    # A recognized zone id (UTC or an Etc/GMT fixed offset), never the Windows
+    # display name which breaks grounding.
+    assert loc["timeZone"] == "UTC" or loc["timeZone"].startswith("Etc/GMT")
+    assert loc["timeZoneOffset"] == expected
+
+
 def test_factory_passes_work_mode_to_client(tmp_path, monkeypatch) -> None:
     token = make_jwt(int(time.time()) + 3600)
     env_path = tmp_path / ".env"
