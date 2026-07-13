@@ -64,6 +64,49 @@ _OPTIONS_SETS = [
     "flux_v3_image_gen_enable_designer_dimensions_meta_prompting_in_system_prompts",
 ]
 
+# Enterprise "Work" option-sets captured from the real M365 Copilot web UI with
+# Work IQ enabled. bizchat_enable_federated_connectors and the enterprise_* flags
+# are what let Copilot ground answers in the user's Microsoft 365 (Graph) data.
+_WORK_OPTIONS_SETS = [
+    "at_mention_plugins_enable",
+    "enable_confirmation_interstitial",
+    "enable_plugin_auth_interstitial",
+    "enable_request_response_interstitials",
+    "enable_response_action_processing",
+    "enterprise_flux_image",
+    "enterprise_flux_web",
+    "enterprise_flux_work",
+    "enterprise_toolbox_with_skdsstore",
+    "enterprise_pagination_support",
+    "search_result_progress_messages_with_search_queries",
+    "flux_v3_gptv_enable_upload_multi_image_in_turn_wo_ch",
+    "rich_responses",
+    "gptvnorm2048",
+    "enterprise_flux_work_code_interpreter",
+    "cwc_code_interpreter_citation_fix",
+    "code_interpreter_interactive_charts",
+    "enterprise_code_interpreter_citation_fix",
+    "cwc_code_interpreter_interactive_charts_inline_image",
+    "code_interpreter_matplotlib_patching",
+    "enable_batch_token_processing",
+    "disable_cea_message_listener",
+    "enable_selective_url_redaction",
+    "update_memory_plugin",
+    "add_custom_instructions",
+    "agent_recommendations",
+    "enable_gg_gpt",
+    "enable_inferred_memory_read",
+    "update_textdoc_response_after_streaming",
+    "deepleo_networking_timeout_10minutes_canmore",
+    "flux_v3_image_gen_enable_dimensions",
+    "flux_v3_image_gen_enable_non_watermarked_storage",
+    "flux_v3_image_gen_enable_icon_dimensions",
+    "flux_v3_image_gen_enable_system_text_with_params",
+    "flux_v3_image_gen_enable_designer_dimensions_meta_prompting_in_system_prompts",
+    "flux_v3_image_gen_enable_story",
+    "bizchat_enable_federated_connectors",
+]
+
 _ALLOWED_MESSAGE_TYPES = [
     "Chat", "Suggestion", "InternalSearchQuery", "Disengaged",
     "InternalLoaderMessage", "Progress", "GeneratedCode", "RenderCardRequest",
@@ -82,7 +125,12 @@ class SubstrateCopilotError(RuntimeError):
 
 
 class SubstrateCopilotClient:
-    def __init__(self, access_token: str, time_zone: str = "Asia/Tokyo"):
+    def __init__(
+        self,
+        access_token: str,
+        time_zone: str = "Asia/Tokyo",
+        work_mode: bool = True,
+    ):
         if not access_token:
             raise SubstrateCopilotError(
                 "M365_ACCESS_TOKEN is missing. Start the debug Edge window and let startup token capture complete, "
@@ -90,6 +138,7 @@ class SubstrateCopilotClient:
             )
         self._token = access_token
         self._time_zone = time_zone
+        self._work_mode = work_mode
         try:
             claims = decode_jwt_payload(access_token)
         except Exception as exc:
@@ -107,6 +156,12 @@ class SubstrateCopilotClient:
 
     def _ws_url(self, conv_id: str, session_id: str, req_id: str) -> str:
         token = quote(self._token, safe="")
+        # Work mode (agent=work, scenario=officeweb) is what lets Copilot ground in
+        # the user's Microsoft 365 data; web mode is the general/web-only assistant.
+        if self._work_mode:
+            tail = "&licenseType=Premium&isEdu=false&agent=work&scenario=officeweb"
+        else:
+            tail = "&licenseType=Starter&agent=web&scenario=OfficeWebIncludedCopilot"
         return (
             f"{_WS_BASE}/{self._oid}@{self._tid}"
             f"?ClientRequestId={req_id}"
@@ -115,7 +170,7 @@ class SubstrateCopilotClient:
             f"&access_token={token}"
             f"&variants={_VARIANTS}"
             f"&source=officeweb&product=Office&agentHost=Bizchat.FullScreen"
-            f"&licenseType=Starter&agent=web&scenario=OfficeWebIncludedCopilot"
+            f"{tail}"
         )
 
     def _chat_invoke(
@@ -131,7 +186,7 @@ class SubstrateCopilotClient:
                 "source": "officeweb",
                 "clientCorrelationId": req_id,
                 "sessionId": session_id,
-                "optionsSets": _OPTIONS_SETS,
+                "optionsSets": _WORK_OPTIONS_SETS if self._work_mode else _OPTIONS_SETS,
                 "streamingMode": "ConciseWithPadding",
                 "spokenTextMode": "None",
                 "options": {},
@@ -172,6 +227,14 @@ class SubstrateCopilotClient:
             "target": "chat",
             "type": 4,
         }
+        if self._work_mode:
+            args = payload["arguments"][0]
+            args["clientInfo"].update({
+                "ProductCategory": "Chat",
+                "productEntryPoint": "ChatPanel",
+                "clientPlatformVersion": "10",
+            })
+            args["disconnectBehavior"] = "continue"
         return json.dumps(payload, ensure_ascii=False) + SIGNALR_SEP
 
     async def chat_stream(
