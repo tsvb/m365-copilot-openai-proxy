@@ -276,12 +276,26 @@ Most users only need `.env` after the proxy captures a token.
 | `M365_ACCESS_TOKEN` | optional at startup | Browser WebSocket token. If missing, startup capture can fill `.env`. |
 | `M365_TIME_ZONE` | `Asia/Tokyo` | Optional. Time zone sent to Copilot. Usually no need to set this if `Asia/Tokyo` is correct. |
 | `M365_MODEL_ALIAS` | `m365-copilot` | Optional. Model name returned by `/v1/models`. Usually no need to change this. |
+| `M365_SCENARIO` | `OfficeWebPaidCopilot` | Copilot scenario. The default (paid) grounds answers in your Microsoft 365 data (mail, calendar, files). Set to `OfficeWebIncludedCopilot` if your account does not have a paid M365 Copilot license. |
+| `M365_LICENSE_TYPE` | `Premium` | Paired with `M365_SCENARIO`. Set to `Starter` for accounts without a paid M365 Copilot license. |
+
+## Querying Your M365 Data
+
+By default the proxy connects as the paid Copilot scenario, so grounded
+natural-language queries about your own data work — e.g. "what meetings do I have
+today?", "summarize my recent emails from Jane". This **requires a paid Microsoft 365
+Copilot license**; accounts without it should set `M365_SCENARIO=OfficeWebIncludedCopilot`
+and `M365_LICENSE_TYPE=Starter` (web grounding only).
+
+Grounding is decided by Copilot per turn and can be inconsistent for terse, single-turn
+questions; clearer or more conversational phrasing tends to ground more reliably.
 
 ## Limitations
 
 - This is an unofficial local proxy over the browser-facing M365 Copilot API.
 - Token refresh depends on a signed-in Edge profile.
 - Tool calls are not supported.
+- M365 data grounding requires a paid M365 Copilot license and is decided by Copilot per turn, so it can be inconsistent.
 - Token usage numbers are placeholders.
 - System prompts and prior conversation history are translated into plain text context.
 
