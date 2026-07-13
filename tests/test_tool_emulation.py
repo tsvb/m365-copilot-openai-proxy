@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from m365_copilot_openai_proxy.config import Settings
-from m365_copilot_openai_proxy.models import OpenAIChatRequest
+from m365_copilot_openai_proxy.models import OpenAIChatRequest, OpenAIMessage
 
 
 def test_chat_request_parses_tools_and_tool_messages() -> None:
@@ -193,3 +193,59 @@ def test_render_prompt_includes_reask_note() -> None:
     request = _request({"model": "m", "tools": [READ_TOOL], "messages": [{"role": "user", "content": "hi"}]})
     prompt = render_action_prompt(filter_tools(request.tools, frozenset({"read"})), request.messages, max_observation_chars=100, reask="TRY AGAIN NOTE")
     assert "TRY AGAIN NOTE" in prompt
+
+
+import asyncio
+
+from m365_copilot_openai_proxy.tool_emulation import run_emulation_turn
+
+
+class ScriptedClient:
+    def __init__(self, replies: list[str]) -> None:
+        self.replies = replies
+        self.prompts: list[str] = []
+
+    async def chat(self, prompt: str, additional_context: list[str], session=None) -> str:
+        self.prompts.append(prompt)
+        return self.replies.pop(0)
+
+
+def _msgs(user: str):
+    return [OpenAIMessage.model_validate({"role": "user", "content": user})]
+
+
+def test_run_returns_tool_action() -> None:
+    client = ScriptedClient(['{"action": "read", "args": {"filePath": "a.py"}}'])
+    tools = _request({"model": "m", "tools": [READ_TOOL], "messages": [{"role": "user", "content": "x"}]}).tools
+    result = asyncio.run(
+        run_emulation_turn(client, filter_tools(tools, frozenset({"read"})), _msgs("summarize a.py"), frozenset({"read"}), max_reasks=2, max_observation_chars=100)
+    )
+    assert result == ToolAction(name="read", args={"filePath": "a.py"})
+
+
+def test_run_returns_final_answer() -> None:
+    client = ScriptedClient(["It defines a class."])
+    result = asyncio.run(
+        run_emulation_turn(client, [], _msgs("what is in a.py"), frozenset({"read"}), max_reasks=2, max_observation_chars=100)
+    )
+    assert result == FinalAnswer(text="It defines a class.")
+
+
+def test_run_reasks_on_unavailable_then_finalizes() -> None:
+    client = ScriptedClient(
+        ['{"action": "write", "args": {}}', '{"action": "bash", "args": {}}', '{"action": "bash", "args": {}}']
+    )
+    result = asyncio.run(
+        run_emulation_turn(client, [], _msgs("do it"), frozenset({"read"}), max_reasks=2, max_observation_chars=100)
+    )
+    assert isinstance(result, FinalAnswer)
+    assert len(client.prompts) == 3  # initial + 2 re-asks
+    assert "not available" in client.prompts[1]
+
+
+def test_run_reasks_on_garbage_then_takes_prose() -> None:
+    client = ScriptedClient(["The answer is 42."])
+    result = asyncio.run(
+        run_emulation_turn(client, [], _msgs("q"), frozenset({"read"}), max_reasks=2, max_observation_chars=100)
+    )
+    assert result == FinalAnswer(text="The answer is 42.")

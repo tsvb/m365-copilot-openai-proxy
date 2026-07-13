@@ -179,3 +179,71 @@ def render_action_prompt(
         sections.append(reask)
     sections.append("Respond now.")
     return "\n\n".join(sections)
+
+
+_REASK_STRICT = (
+    "Note: your previous reply could not be understood. Reply with ONLY a single JSON "
+    "action object, or your final answer as plain prose."
+)
+_REASK_DUPLICATE = (
+    "Note: you already requested that information (see the observation above). Continue "
+    "with a different action or give your final answer as plain prose."
+)
+
+
+def _reask_unavailable(name: str, allowed_names: frozenset[str]) -> str:
+    listed = ", ".join(sorted(allowed_names))
+    return (
+        f'Note: the action "{name}" is not available. Use only these actions: {listed}. '
+        "Or give your final answer as plain prose."
+    )
+
+
+def _prior_action_keys(messages: list[OpenAIMessage]) -> set[tuple[str, str]]:
+    keys: set[tuple[str, str]] = set()
+    for message in messages:
+        if message.role == "assistant" and message.tool_calls:
+            for call in message.tool_calls:
+                try:
+                    parsed = json.loads(call.function.arguments or "{}")
+                except json.JSONDecodeError:
+                    parsed = {}
+                keys.add((call.function.name, json.dumps(parsed, sort_keys=True)))
+    return keys
+
+
+def _action_key(action: ToolAction) -> tuple[str, str]:
+    return (action.name, json.dumps(action.args, sort_keys=True))
+
+
+async def run_emulation_turn(
+    client,
+    tools: list[ToolSpec],
+    messages: list[OpenAIMessage],
+    allowed_names: frozenset[str],
+    *,
+    max_reasks: int,
+    max_observation_chars: int,
+) -> ToolAction | FinalAnswer:
+    prior_keys = _prior_action_keys(messages)
+    reask: str | None = None
+    last_text = ""
+
+    for _ in range(max_reasks + 1):
+        prompt = render_action_prompt(
+            tools, messages, max_observation_chars=max_observation_chars, reask=reask
+        )
+        last_text = await client.chat(prompt, [])
+        result = parse_copilot_turn(last_text, allowed_names)
+
+        if isinstance(result, FinalAnswer):
+            return result
+        if isinstance(result, UnavailableAction):
+            reask = _reask_unavailable(result.name, allowed_names)
+            continue
+        if _action_key(result) in prior_keys:
+            reask = _REASK_DUPLICATE
+            continue
+        return result
+
+    return FinalAnswer(text=last_text.strip())
