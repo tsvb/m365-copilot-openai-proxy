@@ -65,17 +65,59 @@ def _final_message_response(model_alias: str, text: str) -> dict:
     }
 
 
-async def _emulation_stream(model_alias, client, request, tools, allowed, settings) -> AsyncIterator[str]:
-    result = await run_emulation_turn(
-        client,
-        tools,
-        request.messages,
-        allowed,
-        max_reasks=settings.max_reasks,
-        max_observation_chars=settings.max_observation_chars,
-    )
-    text = result.text if isinstance(result, FinalAnswer) else json.dumps(result.args)
-    yield f"data: {json.dumps({'choices': [{'index': 0, 'delta': {'content': text}, 'finish_reason': 'stop'}]})}\n\n"
+async def _emulation_stream(
+    model_alias: str,
+    client: SubstrateCopilotClient,
+    request: OpenAIChatRequest,
+    tools,
+    allowed,
+    settings: Settings,
+) -> AsyncIterator[str]:
+    completion_id = f"chatcmpl_{uuid.uuid4().hex}"
+    created = int(time.time())
+
+    def chunk(delta: dict, finish_reason=None) -> str:
+        payload = {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model_alias,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+        }
+        return f"data: {json.dumps(payload)}\n\n"
+
+    try:
+        result = await run_emulation_turn(
+            client,
+            tools,
+            request.messages,
+            allowed,
+            max_reasks=settings.max_reasks,
+            max_observation_chars=settings.max_observation_chars,
+        )
+    except SubstrateCopilotError as exc:
+        yield f"data: {json.dumps({'error': {'message': str(exc), 'type': 'upstream_error'}})}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+
+    yield chunk({"role": "assistant"})
+    if isinstance(result, ToolAction):
+        yield chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": f"call_{uuid.uuid4().hex[:24]}",
+                        "type": "function",
+                        "function": {"name": result.name, "arguments": json.dumps(result.args)},
+                    }
+                ]
+            }
+        )
+        yield chunk({}, finish_reason="tool_calls")
+    else:
+        yield chunk({"content": result.text})
+        yield chunk({}, finish_reason="stop")
     yield "data: [DONE]\n\n"
 
 

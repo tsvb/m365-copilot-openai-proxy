@@ -541,3 +541,65 @@ def test_chat_completions_without_tools_uses_plain_path() -> None:
     )
     assert response.status_code == 200
     assert response.json()["choices"][0]["message"]["content"] == "copilot reply"
+
+
+class FailingStreamChatClient(FakeCopilotClient):
+    async def chat(self, prompt: str, additional_context: list[str], session: object | None = None) -> str:
+        raise SubstrateCopilotError("upstream broke")
+
+
+def _collect_stream(client, payload) -> str:
+    with client.stream("POST", "/v1/chat/completions", json=payload) as response:
+        assert response.status_code == 200
+        return "".join(
+            chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+            for chunk in response.iter_text()
+        )
+
+
+def test_streaming_tool_call_emits_tool_calls_delta() -> None:
+    fake = ScriptedChatClient(['{"action": "read", "args": {"filePath": "app.py"}}'])
+    client = build_client(fake)
+    payload = {
+        "model": "m365-copilot",
+        "stream": True,
+        "tools": [READ_TOOL_PAYLOAD],
+        "messages": [{"role": "user", "content": "summarize app.py"}],
+    }
+    body = _collect_stream(client, payload)
+    assert '"tool_calls"' in body
+    assert '"name": "read"' in body
+    assert '"finish_reason": "tool_calls"' in body
+    assert "data: [DONE]" in body
+
+
+def test_streaming_final_emits_content_delta() -> None:
+    fake = ScriptedChatClient(["It defines create_app()."])
+    client = build_client(fake)
+    payload = {
+        "model": "m365-copilot",
+        "stream": True,
+        "tools": [READ_TOOL_PAYLOAD],
+        "messages": [
+            {"role": "user", "content": "summarize app.py"},
+            {"role": "assistant", "content": None, "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "read", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "def create_app(): ..."},
+        ],
+    }
+    body = _collect_stream(client, payload)
+    assert '"content": "It defines create_app()."' in body
+    assert '"finish_reason": "stop"' in body
+    assert "data: [DONE]" in body
+
+
+def test_streaming_emulation_emits_error_on_upstream_failure() -> None:
+    client = build_client(FailingStreamChatClient())
+    payload = {
+        "model": "m365-copilot",
+        "stream": True,
+        "tools": [READ_TOOL_PAYLOAD],
+        "messages": [{"role": "user", "content": "summarize app.py"}],
+    }
+    body = _collect_stream(client, payload)
+    assert '"type": "upstream_error"' in body
+    assert "data: [DONE]" in body
