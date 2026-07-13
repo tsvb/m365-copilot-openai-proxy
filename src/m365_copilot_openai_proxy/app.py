@@ -32,8 +32,7 @@ def create_app(
         lambda: SubstrateCopilotClient(
             app.state.token_store.get(),
             resolved_settings.time_zone,
-            scenario=resolved_settings.scenario,
-            license_type=resolved_settings.license_type,
+            work_mode=resolved_settings.work_mode,
         )
     )
 
