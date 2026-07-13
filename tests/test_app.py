@@ -482,3 +482,23 @@ def test_settings_scenario_and_license_are_overridable() -> None:
     )
     assert settings.scenario == "OfficeWebIncludedCopilot"
     assert settings.license_type == "Starter"
+
+
+def test_ws_url_defaults_to_paid_grounding_params() -> None:
+    client = SubstrateCopilotClient(make_jwt(int(time.time()) + 3600))
+    url = client._ws_url("conv", "sess", "req")
+    assert "scenario=OfficeWebPaidCopilot" in url
+    assert "licenseType=Premium" in url
+    assert "OfficeWebIncludedCopilot" not in url
+    assert "licenseType=Starter" not in url
+
+
+def test_ws_url_honors_custom_scenario_and_license() -> None:
+    client = SubstrateCopilotClient(
+        make_jwt(int(time.time()) + 3600),
+        scenario="OfficeWebIncludedCopilot",
+        license_type="Starter",
+    )
+    url = client._ws_url("conv", "sess", "req")
+    assert "scenario=OfficeWebIncludedCopilot" in url
+    assert "licenseType=Starter" in url

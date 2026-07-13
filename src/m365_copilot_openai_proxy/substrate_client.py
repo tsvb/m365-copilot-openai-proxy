@@ -82,7 +82,13 @@ class SubstrateCopilotError(RuntimeError):
 
 
 class SubstrateCopilotClient:
-    def __init__(self, access_token: str, time_zone: str = "Asia/Tokyo"):
+    def __init__(
+        self,
+        access_token: str,
+        time_zone: str = "Asia/Tokyo",
+        scenario: str = "OfficeWebPaidCopilot",
+        license_type: str = "Premium",
+    ):
         if not access_token:
             raise SubstrateCopilotError(
                 "M365_ACCESS_TOKEN is missing. Start the debug Edge window and let startup token capture complete, "
@@ -90,6 +96,8 @@ class SubstrateCopilotClient:
             )
         self._token = access_token
         self._time_zone = time_zone
+        self._scenario = scenario
+        self._license_type = license_type
         try:
             claims = decode_jwt_payload(access_token)
         except Exception as exc:
@@ -115,7 +123,7 @@ class SubstrateCopilotClient:
             f"&access_token={token}"
             f"&variants={_VARIANTS}"
             f"&source=officeweb&product=Office&agentHost=Bizchat.FullScreen"
-            f"&licenseType=Starter&agent=web&scenario=OfficeWebIncludedCopilot"
+            f"&licenseType={self._license_type}&agent=web&scenario={self._scenario}"
         )
 
     def _chat_invoke(
