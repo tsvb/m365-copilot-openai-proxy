@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from m365_copilot_openai_proxy.config import Settings
 from m365_copilot_openai_proxy.models import OpenAIChatRequest
 
 
@@ -36,3 +37,17 @@ def test_chat_request_parses_tools_and_tool_messages() -> None:
     assert request.messages[1].tool_calls[0].function.arguments == '{"filePath": "app.py"}'
     assert request.messages[2].tool_call_id == "call_1"
     assert request.messages[1].content is None
+
+
+def test_settings_expose_read_only_tool_names() -> None:
+    settings = Settings(M365_ACCESS_TOKEN="x", M365_READ_ONLY_TOOLS="read, glob ,GREP")
+    assert settings.read_only_tool_names == frozenset({"read", "glob", "grep"})
+    assert settings.max_reasks == 2
+    assert settings.max_observation_chars == 12000
+
+
+def test_settings_default_read_only_tools() -> None:
+    settings = Settings(M365_ACCESS_TOKEN="x")
+    assert "read" in settings.read_only_tool_names
+    assert "glob" in settings.read_only_tool_names
+    assert "grep" in settings.read_only_tool_names
