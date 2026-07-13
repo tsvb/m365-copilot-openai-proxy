@@ -485,8 +485,10 @@ def test_cli_auto_refresh_falls_back_to_reload_capture(tmp_path, monkeypatch) ->
     token = make_jwt(int(time.time()) + 3600)
     monkeypatch.chdir(tmp_path)
     reload_calls = 0
+    extract_nudge_flags: list[bool] = []
 
     async def fake_extract(_port, *, allow_nudge=True):
+        extract_nudge_flags.append(allow_nudge)
         return None
 
     async def fake_reload(_port, timeout_seconds):
@@ -499,6 +501,7 @@ def test_cli_auto_refresh_falls_back_to_reload_capture(tmp_path, monkeypatch) ->
 
     assert cli._try_auto_refresh(9222) is True
     assert reload_calls == 1
+    assert extract_nudge_flags == [False]  # storage extraction must not nudge
     assert cli._read_token() == token
 
 

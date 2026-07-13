@@ -207,11 +207,12 @@ async def _cdp_reload_and_capture_token(cdp_port: int, timeout_seconds: int) -> 
 
     targets_request_id = 3
     nudge_delay_seconds = 4.0
+    retarget_interval_seconds = 2.0
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_seconds
     page_session: str | None = None
+    nudged_session: str | None = None
     reloaded = False
-    nudged = False
     nudge_at: float | None = None
     try:
         async with websockets.connect(browser_ws, max_size=None) as ws:
@@ -221,10 +222,20 @@ async def _cdp_reload_and_capture_token(cdp_port: int, timeout_seconds: int) -> 
                 "params": {"autoAttach": True, "waitForDebuggerOnStart": False, "flatten": True},
             }))
             await ws.send(json.dumps({"id": targets_request_id, "method": "Target.getTargets"}))
+            last_targets_request = loop.time()
             while loop.time() < deadline:
-                if reloaded and not nudged and nudge_at is not None and loop.time() >= nudge_at and page_session:
+                now = loop.time()
+                # Nudge once the page has settled, and re-nudge if the session
+                # changed (e.g. a post-reload navigation swap) so we always act on
+                # the live page rather than a torn-down one.
+                if page_session and page_session != nudged_session and nudge_at is not None and now >= nudge_at:
                     await _cdp_nudge_page(ws, page_session, next_id)
-                    nudged = True
+                    nudged_session = page_session
+                # Keep looking for the Copilot page until we attach to one, in case
+                # it was mid-navigation during the first enumeration.
+                if page_session is None and now - last_targets_request >= retarget_interval_seconds:
+                    await ws.send(json.dumps({"id": targets_request_id, "method": "Target.getTargets"}))
+                    last_targets_request = now
 
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=0.5)
@@ -258,17 +269,19 @@ async def _cdp_reload_and_capture_token(cdp_port: int, timeout_seconds: int) -> 
                         info.get("type") == "page"
                         and info.get("url", "").startswith("https://m365.cloud.microsoft/")
                     ):
-                        # Track the latest Copilot page session so the nudge lands
-                        # on the post-reload page, not the torn-down one. Enable
-                        # Network now (well before the nudge) so the chathub
+                        session_id = params.get("sessionId")
+                        # Enable Network now (well before the nudge) so the chathub
                         # webSocketCreated event is not missed.
-                        page_session = params.get("sessionId")
-                        await ws.send(json.dumps({"id": next_id(), "method": "Network.enable", "sessionId": page_session}))
-                        if not reloaded:
-                            await ws.send(json.dumps({"id": next_id(), "method": "Page.enable", "sessionId": page_session}))
-                            await ws.send(json.dumps({"id": next_id(), "method": "Page.reload", "sessionId": page_session}))
-                            reloaded = True
+                        await ws.send(json.dumps({"id": next_id(), "method": "Network.enable", "sessionId": session_id}))
+                        if session_id != page_session:
+                            # A new (or the first) Copilot page session; schedule a
+                            # nudge for it after it settles.
+                            page_session = session_id
                             nudge_at = loop.time() + nudge_delay_seconds
+                        if not reloaded:
+                            await ws.send(json.dumps({"id": next_id(), "method": "Page.enable", "sessionId": session_id}))
+                            await ws.send(json.dumps({"id": next_id(), "method": "Page.reload", "sessionId": session_id}))
+                            reloaded = True
                     continue
                 if method == "Network.webSocketCreated":
                     url = msg.get("params", {}).get("url", "")
